@@ -35,7 +35,7 @@ interface Completion {
 
 // ─── Storage keys ─────────────────────────────────────────────────────────────
 
-const HABITS_KEY = '@habits';
+const HABITS_KEY = '@habits'; // AsyncStorage key for habit list
 const COMPLETIONS_KEY = '@completions';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
