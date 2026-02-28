@@ -1,27 +1,32 @@
 /**
  * App.tsx — Habit Tracker
  *
- * Root component. Handles all state, persistence, and rendering.
- * No external state management — just React hooks + AsyncStorage.
- *
  * Data model:
- *   Habit      { id, name, createdAt, videoId, videoTitle }
+ *   Habit      { id, name, createdAt, videoId, videoTitle,
+ *                playlistId, playlistTitle, playlistCategory, playlistEmoji, playlistColor }
  *   Completion { habitId, date }
  *
- * Persistence: AsyncStorage (key-value, survives app restarts)
- * Streak logic: counts consecutive days backward from today
- * Video: curated keyword match via lib/videos.ts on habit creation
+ * On habit creation:
+ *   - suggestVideo()    → stores a motivational YouTube video
+ *   - suggestPlaylist() → stores a curated playlist matched to the habit keyword
  */
 
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, FlatList,
   StyleSheet, SafeAreaView, StatusBar, Alert, Platform,
-  KeyboardAvoidingView, Keyboard, Dimensions,
+  KeyboardAvoidingView, Keyboard, Dimensions, LayoutAnimation,
+  UIManager,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import YoutubePlayer from 'react-native-youtube-iframe';
 import { suggestVideo } from './lib/videos';
+import { suggestPlaylist } from './lib/playlists';
+
+// Enable LayoutAnimation on Android
+if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
+  UIManager.setLayoutAnimationEnabledExperimental(true);
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -29,8 +34,15 @@ interface Habit {
   id: string;
   name: string;
   createdAt: string;
-  videoId: string;       // suggested YouTube video ID
-  videoTitle: string;    // human-readable title for the video
+  // Video suggestion
+  videoId: string;
+  videoTitle: string;
+  // Playlist suggestion
+  playlistId: string;
+  playlistTitle: string;
+  playlistCategory: string;
+  playlistEmoji: string;
+  playlistColor: string;
 }
 
 interface Completion {
@@ -38,19 +50,15 @@ interface Completion {
   date: string; // YYYY-MM-DD
 }
 
-// ─── Storage keys ─────────────────────────────────────────────────────────────
-
-const HABITS_KEY = '@habits'; // AsyncStorage key for habit list
+const HABITS_KEY = '@habits';
 const COMPLETIONS_KEY = '@completions';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/** Returns today's date as YYYY-MM-DD */
 function todayStr(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-/** Returns the last N dates as YYYY-MM-DD strings, ending today */
 function lastNDays(n: number): string[] {
   const days: string[] = [];
   const cur = new Date();
@@ -62,49 +70,34 @@ function lastNDays(n: number): string[] {
   return days;
 }
 
-/**
- * Calculates the current streak for a habit.
- * Today being incomplete does NOT break the streak.
- */
 function getStreak(habitId: string, completions: Completion[]): number {
   const dates = completions
     .filter((c) => c.habitId === habitId)
     .map((c) => c.date)
     .sort()
     .reverse();
-
   if (!dates.length) return 0;
-
   let streak = 0;
   const cur = new Date();
-
   for (let i = 0; i < 365; i++) {
     const d = cur.toISOString().slice(0, 10);
-    if (dates.includes(d)) {
-      streak++;
-      cur.setDate(cur.getDate() - 1);
-    } else if (i === 0) {
-      cur.setDate(cur.getDate() - 1);
-    } else {
-      break;
-    }
+    if (dates.includes(d)) { streak++; cur.setDate(cur.getDate() - 1); }
+    else if (i === 0) { cur.setDate(cur.getDate() - 1); }
+    else { break; }
   }
   return streak;
 }
 
 // ─── WeekDots ─────────────────────────────────────────────────────────────────
 
-/** Mini 7-dot row showing past week's completion history */
 function WeekDots({ habitId, completions }: { habitId: string; completions: Completion[] }) {
   const days = lastNDays(7);
   const DAY_LABELS = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
-
   const dots = days.map((date) => {
     const done = completions.some((c) => c.habitId === habitId && c.date === date);
     const dayIndex = (new Date(date).getUTCDay() + 6) % 7;
     return { date, done, label: DAY_LABELS[dayIndex] };
   });
-
   return (
     <View style={dotStyles.row}>
       {dots.map(({ date, done, label }) => (
@@ -128,17 +121,11 @@ const dotStyles = StyleSheet.create({
 
 // ─── HabitCard ────────────────────────────────────────────────────────────────
 
-const CARD_WIDTH = Dimensions.get('window').width - 40; // full width minus horizontal padding
-const VIDEO_HEIGHT = Math.round(CARD_WIDTH * 9 / 16);  // 16:9 aspect ratio
+const CARD_WIDTH = Dimensions.get('window').width - 40;
+const VIDEO_HEIGHT = Math.round(CARD_WIDTH * 9 / 16);
 
-/**
- * Expandable habit card.
- * Tapping the card toggles today's completion.
- * Tapping the "Watch" button expands/collapses the embedded YouTube player.
- */
 function HabitCard({
-  habit, completions, today,
-  onToggle, onDelete,
+  habit, completions, today, onToggle, onDelete,
 }: {
   habit: Habit;
   completions: Completion[];
@@ -147,14 +134,30 @@ function HabitCard({
   onDelete: (id: string) => void;
 }) {
   const [showVideo, setShowVideo] = useState(false);
+  const [showPlaylist, setShowPlaylist] = useState(false);
+
   const done = completions.some((c) => c.habitId === habit.id && c.date === today);
   const streak = getStreak(habit.id, completions);
 
+  // Animate expand/collapse smoothly
+  const toggleVideo = () => {
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setShowVideo((v) => !v);
+    if (showPlaylist) setShowPlaylist(false);
+  };
+
+  const togglePlaylist = () => {
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setShowPlaylist((v) => !v);
+    if (showVideo) setShowVideo(false);
+  };
+
   return (
     <View style={[cardStyles.card, done && cardStyles.cardDone]}>
-      {/* Top row: checkbox + name + streak + watch button */}
+
+      {/* ── Top row: checkbox · name · streak · category pill ── */}
       <TouchableOpacity
-        style={cardStyles.row}
+        style={cardStyles.topRow}
         onPress={() => onToggle(habit.id)}
         onLongPress={() => onDelete(habit.id)}
         activeOpacity={0.7}
@@ -162,32 +165,71 @@ function HabitCard({
         <View style={[cardStyles.checkbox, done && cardStyles.checkboxDone]}>
           {done && <Text style={cardStyles.checkmark}>✓</Text>}
         </View>
-        <Text style={[cardStyles.habitName, done && cardStyles.habitNameDone]}>{habit.name}</Text>
+        <Text style={[cardStyles.habitName, done && cardStyles.habitNameDone]} numberOfLines={1}>
+          {habit.name}
+        </Text>
         {streak > 0 && <Text style={cardStyles.streak}>🔥 {streak}</Text>}
-        {/* Watch / hide video toggle */}
-        <TouchableOpacity
-          style={[cardStyles.watchBtn, showVideo && cardStyles.watchBtnActive]}
-          onPress={() => setShowVideo((v) => !v)}
-          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-        >
-          <Text style={[cardStyles.watchBtnText, showVideo && cardStyles.watchBtnTextActive]}>
-            {showVideo ? 'Hide' : '▶'}
-          </Text>
-        </TouchableOpacity>
+        {/* Category pill — always visible */}
+        {habit.playlistCategory ? (
+          <View style={[cardStyles.pill, { backgroundColor: habit.playlistColor || '#EEF2FF' }]}>
+            <Text style={cardStyles.pillText}>{habit.playlistEmoji} {habit.playlistCategory}</Text>
+          </View>
+        ) : null}
       </TouchableOpacity>
 
-      {/* 7-day dot row */}
+      {/* ── 7-day dots ── */}
       <WeekDots habitId={habit.id} completions={completions} />
 
-      {/* Embedded YouTube player — shown when expanded */}
+      {/* ── Action buttons row ── */}
+      <View style={cardStyles.btnRow}>
+        {/* Video button */}
+        <TouchableOpacity
+          style={[cardStyles.actionBtn, showVideo && cardStyles.actionBtnActive]}
+          onPress={toggleVideo}
+        >
+          <Text style={[cardStyles.actionBtnText, showVideo && cardStyles.actionBtnTextActive]}>
+            {showVideo ? '▼ Video' : '▶ Video'}
+          </Text>
+        </TouchableOpacity>
+
+        {/* Playlist button — only shown if habit has a playlist */}
+        {habit.playlistId ? (
+          <TouchableOpacity
+            style={[cardStyles.actionBtn, cardStyles.playlistBtn, showPlaylist && cardStyles.playlistBtnActive]}
+            onPress={togglePlaylist}
+          >
+            <Text style={[cardStyles.actionBtnText, showPlaylist && cardStyles.actionBtnTextActive]}>
+              {showPlaylist ? '▼ Playlist' : '♫ Playlist'}
+            </Text>
+          </TouchableOpacity>
+        ) : null}
+      </View>
+
+      {/* ── Embedded video player (animated expand) ── */}
       {showVideo && (
-        <View style={cardStyles.videoWrapper}>
-          <Text style={cardStyles.videoTitle} numberOfLines={1}>{habit.videoTitle}</Text>
+        <View style={cardStyles.mediaWrapper}>
+          <Text style={cardStyles.mediaTitle} numberOfLines={1}>{habit.videoTitle}</Text>
           <YoutubePlayer
             height={VIDEO_HEIGHT}
-            width={CARD_WIDTH - 32} // card padding
+            width={CARD_WIDTH - 32}
             videoId={habit.videoId}
             play={false}
+          />
+        </View>
+      )}
+
+      {/* ── Embedded playlist player (animated expand) ── */}
+      {showPlaylist && habit.playlistId && (
+        <View style={cardStyles.mediaWrapper}>
+          <Text style={cardStyles.mediaTitle} numberOfLines={1}>
+            {habit.playlistEmoji} {habit.playlistTitle}
+          </Text>
+          <YoutubePlayer
+            height={VIDEO_HEIGHT}
+            width={CARD_WIDTH - 32}
+            videoId=""
+            play={false}
+            initialPlayerParams={{ listType: 'playlist', list: habit.playlistId }}
           />
         </View>
       )}
@@ -202,26 +244,34 @@ const cardStyles = StyleSheet.create({
     elevation: 2,
   },
   cardDone: { backgroundColor: '#F0FFF4' },
-  row: { flexDirection: 'row', alignItems: 'center' },
+  topRow: { flexDirection: 'row', alignItems: 'center' },
   checkbox: {
-    width: 26, height: 26, borderRadius: 13,
-    borderWidth: 2, borderColor: '#D1D1D6',
-    marginRight: 12, alignItems: 'center', justifyContent: 'center',
+    width: 26, height: 26, borderRadius: 13, borderWidth: 2, borderColor: '#D1D1D6',
+    marginRight: 12, alignItems: 'center', justifyContent: 'center', flexShrink: 0,
   },
   checkboxDone: { backgroundColor: '#34C759', borderColor: '#34C759' },
   checkmark: { color: '#fff', fontSize: 14, fontWeight: '700' },
   habitName: { flex: 1, fontSize: 16, fontWeight: '500', color: '#1C1C1E' },
   habitNameDone: { color: '#8E8E93', textDecorationLine: 'line-through' },
-  streak: { fontSize: 13, fontWeight: '600', color: '#FF9500', marginRight: 8 },
-  watchBtn: {
-    backgroundColor: '#F2F2F7', borderRadius: 8,
-    paddingHorizontal: 10, paddingVertical: 5,
+  streak: { fontSize: 13, fontWeight: '600', color: '#FF9500', marginHorizontal: 6 },
+  // Category pill
+  pill: {
+    borderRadius: 20, paddingHorizontal: 8, paddingVertical: 3, marginLeft: 4,
   },
-  watchBtnActive: { backgroundColor: '#007AFF' },
-  watchBtnText: { fontSize: 12, fontWeight: '600', color: '#007AFF' },
-  watchBtnTextActive: { color: '#fff' },
-  videoWrapper: { marginTop: 12 },
-  videoTitle: { fontSize: 12, color: '#8E8E93', marginBottom: 6, fontStyle: 'italic' },
+  pillText: { fontSize: 10, fontWeight: '600', color: '#374151' },
+  // Action buttons
+  btnRow: { flexDirection: 'row', gap: 8, marginTop: 10 },
+  actionBtn: {
+    backgroundColor: '#F2F2F7', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 6,
+  },
+  actionBtnActive: { backgroundColor: '#007AFF' },
+  playlistBtn: { backgroundColor: '#F0FDF4' },
+  playlistBtnActive: { backgroundColor: '#34C759' },
+  actionBtnText: { fontSize: 12, fontWeight: '600', color: '#007AFF' },
+  actionBtnTextActive: { color: '#fff' },
+  // Media embed
+  mediaWrapper: { marginTop: 12 },
+  mediaTitle: { fontSize: 12, color: '#8E8E93', marginBottom: 6, fontStyle: 'italic' },
 });
 
 // ─── App ──────────────────────────────────────────────────────────────────────
@@ -253,13 +303,19 @@ export default function App() {
   const addHabit = async () => {
     const name = input.trim();
     if (!name) return;
-    const { videoId, videoTitle } = suggestVideo(name); // match a video on creation
+    const { videoId, videoTitle } = suggestVideo(name);
+    const playlist = suggestPlaylist(name);
     const habit: Habit = {
       id: Date.now().toString(),
       name,
       createdAt: new Date().toISOString(),
       videoId,
       videoTitle,
+      playlistId: playlist.playlistId,
+      playlistTitle: playlist.title,
+      playlistCategory: playlist.category,
+      playlistEmoji: playlist.emoji,
+      playlistColor: playlist.color,
     };
     await saveHabits([...habits, habit]);
     setInput('');
@@ -304,23 +360,19 @@ export default function App() {
             {new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
           </Text>
 
-          {/* Stats dashboard */}
           <View style={styles.statsRow}>
-            <View style={styles.statCard}>
-              <Text style={styles.statValue}>{habits.length}</Text>
-              <Text style={styles.statLabel}>Total</Text>
-            </View>
-            <View style={styles.statCard}>
-              <Text style={[styles.statValue, { color: '#34C759' }]}>{completedToday}</Text>
-              <Text style={styles.statLabel}>Done Today</Text>
-            </View>
-            <View style={styles.statCard}>
-              <Text style={[styles.statValue, { color: '#FF9500' }]}>{longestStreak}</Text>
-              <Text style={styles.statLabel}>Best Streak</Text>
-            </View>
+            {[
+              { label: 'Total', value: habits.length, color: '#007AFF' },
+              { label: 'Done Today', value: completedToday, color: '#34C759' },
+              { label: 'Best Streak', value: longestStreak, color: '#FF9500' },
+            ].map(({ label, value, color }) => (
+              <View key={label} style={styles.statCard}>
+                <Text style={[styles.statValue, { color }]}>{value}</Text>
+                <Text style={styles.statLabel}>{label}</Text>
+              </View>
+            ))}
           </View>
 
-          {/* Habit list */}
           <FlatList
             data={habits}
             keyExtractor={(item) => item.id}
@@ -335,13 +387,10 @@ export default function App() {
             )}
             style={styles.list}
             contentContainerStyle={habits.length === 0 && styles.emptyContainer}
-            ListEmptyComponent={
-              <Text style={styles.emptyText}>No habits yet.{'\n'}Add one below 👇</Text>
-            }
+            ListEmptyComponent={<Text style={styles.emptyText}>No habits yet.{'\n'}Add one below 👇</Text>}
             showsVerticalScrollIndicator={false}
           />
 
-          {/* Add habit input */}
           <View style={styles.inputRow}>
             <TextInput
               style={styles.input}
@@ -362,8 +411,6 @@ export default function App() {
   );
 }
 
-// ─── Styles ───────────────────────────────────────────────────────────────────
-
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: '#F2F2F7' },
   flex: { flex: 1 },
@@ -372,12 +419,11 @@ const styles = StyleSheet.create({
   dateLabel: { fontSize: 15, color: '#8E8E93', marginTop: 2, marginBottom: 16 },
   statsRow: { flexDirection: 'row', gap: 10, marginBottom: 20 },
   statCard: {
-    flex: 1, backgroundColor: '#fff', borderRadius: 14,
-    paddingVertical: 14, alignItems: 'center',
+    flex: 1, backgroundColor: '#fff', borderRadius: 14, paddingVertical: 14, alignItems: 'center',
     shadowColor: '#000', shadowOpacity: 0.06, shadowRadius: 8, shadowOffset: { width: 0, height: 2 },
     elevation: 2,
   },
-  statValue: { fontSize: 22, fontWeight: '700', color: '#007AFF' },
+  statValue: { fontSize: 22, fontWeight: '700' },
   statLabel: { fontSize: 11, color: '#8E8E93', marginTop: 2, fontWeight: '500' },
   list: { flex: 1 },
   emptyContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
@@ -393,8 +439,8 @@ const styles = StyleSheet.create({
     elevation: 2,
   },
   addButton: {
-    backgroundColor: '#007AFF', borderRadius: 14,
-    width: 52, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: '#007AFF', borderRadius: 14, width: 52,
+    alignItems: 'center', justifyContent: 'center',
   },
   addButtonText: { color: '#fff', fontSize: 28, fontWeight: '300', lineHeight: 34 },
 });
