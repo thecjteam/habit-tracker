@@ -45,6 +45,18 @@ function todayStr(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+/** Returns the last N dates as YYYY-MM-DD strings, ending today */
+function lastNDays(n: number): string[] {
+  const days: string[] = [];
+  const cur = new Date();
+  for (let i = n - 1; i >= 0; i--) {
+    const d = new Date(cur);
+    d.setDate(cur.getDate() - i);
+    days.push(d.toISOString().slice(0, 10));
+  }
+  return days;
+}
+
 /**
  * Calculates the current streak for a habit.
  * Walks backwards from today; breaks on any missed day.
@@ -76,6 +88,44 @@ function getStreak(habitId: string, completions: Completion[]): number {
   }
   return streak;
 }
+
+// ─── WeekDots ─────────────────────────────────────────────────────────────────
+
+/**
+ * Renders a row of 7 dots showing completion status for the past 7 days.
+ * Filled green dot = completed, gray = missed or future.
+ */
+function WeekDots({ habitId, completions }: { habitId: string; completions: Completion[] }) {
+  const days = lastNDays(7);
+  const DAY_LABELS = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
+
+  // Map each of the 7 dates to its day-of-week label (Mon=0 offset)
+  const dots = days.map((date) => {
+    const done = completions.some((c) => c.habitId === habitId && c.date === date);
+    const dayIndex = (new Date(date).getUTCDay() + 6) % 7; // 0=Mon … 6=Sun
+    return { date, done, label: DAY_LABELS[dayIndex] };
+  });
+
+  return (
+    <View style={dotStyles.row}>
+      {dots.map(({ date, done, label }) => (
+        <View key={date} style={dotStyles.dotWrapper}>
+          <View style={[dotStyles.dot, done ? dotStyles.dotDone : dotStyles.dotEmpty]} />
+          <Text style={dotStyles.label}>{label}</Text>
+        </View>
+      ))}
+    </View>
+  );
+}
+
+const dotStyles = StyleSheet.create({
+  row: { flexDirection: 'row', gap: 6, marginTop: 8 },
+  dotWrapper: { alignItems: 'center', gap: 3 },
+  dot: { width: 10, height: 10, borderRadius: 5 },
+  dotDone: { backgroundColor: '#34C759' },   // iOS green = completed
+  dotEmpty: { backgroundColor: '#D1D1D6' },  // iOS gray  = missed/future
+  label: { fontSize: 9, color: '#8E8E93', fontWeight: '500' },
+});
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
@@ -159,18 +209,17 @@ export default function App() {
         onLongPress={() => deleteHabit(item.id)}        // long press = delete
         activeOpacity={0.7}
       >
-        {/* Completion circle */}
-        <View style={[styles.checkbox, done && styles.checkboxDone]}>
-          {done && <Text style={styles.checkmark}>✓</Text>}
+        {/* Top row: checkbox + name + streak */}
+        <View style={styles.habitRow}>
+          <View style={[styles.checkbox, done && styles.checkboxDone]}>
+            {done && <Text style={styles.checkmark}>✓</Text>}
+          </View>
+          <Text style={[styles.habitName, done && styles.habitNameDone]}>{item.name}</Text>
+          {streak > 0 && <Text style={styles.streak}>🔥 {streak}</Text>}
         </View>
 
-        {/* Habit name */}
-        <Text style={[styles.habitName, done && styles.habitNameDone]}>{item.name}</Text>
-
-        {/* Streak badge — only shown when streak > 0 */}
-        {streak > 0 && (
-          <Text style={styles.streak}>🔥 {streak}</Text>
-        )}
+        {/* 7-day dot progress row */}
+        <WeekDots habitId={item.id} completions={completions} />
       </TouchableOpacity>
     );
   };
@@ -265,12 +314,12 @@ const styles = StyleSheet.create({
   emptyText: { textAlign: 'center', color: '#8E8E93', fontSize: 16, lineHeight: 24 },
 
   habitCard: {
-    flexDirection: 'row', alignItems: 'center',
     backgroundColor: '#fff', borderRadius: 14, padding: 16, marginBottom: 10,
     shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 6, shadowOffset: { width: 0, height: 2 },
     elevation: 2,
   },
   habitCardDone: { backgroundColor: '#F0FFF4' },  // subtle green tint when complete
+  habitRow: { flexDirection: 'row', alignItems: 'center' },
   checkbox: {
     width: 26, height: 26, borderRadius: 13,
     borderWidth: 2, borderColor: '#D1D1D6',
